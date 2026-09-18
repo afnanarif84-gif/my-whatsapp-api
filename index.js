@@ -2,19 +2,22 @@ const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = requi
 const QRCode = require('qrcode');
 const express = require("express");
 const pino = require("pino");
+const cors = require("cors"); // ১. CORS ইমপোর্ট করা হয়েছে
 
 const app = express();
+app.use(cors()); // ২. এটি ব্রাউজার থেকে রিকোয়েস্ট আসার অনুমতি দিবে
+
 const port = process.env.PORT || 3000;
 let sock;
 let isConnected = false;
-let lastQR = null; // এখানে কিউআর কোড সেভ থাকবে
+let lastQR = null;
 
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('session_auth');
 
     sock = makeWASocket({
         auth: state,
-        printQRInTerminal: true, // টার্মিনালেও দেখাবে
+        printQRInTerminal: true,
         logger: pino({ level: 'silent' })
     });
 
@@ -22,7 +25,7 @@ async function connectToWhatsApp() {
         const { connection, lastDisconnect, qr } = update;
         
         if (qr) {
-            lastQR = qr; // নতুন কিউআর কোড আসলে সেটি ধরবে
+            lastQR = qr;
         }
 
         if (connection === 'close') {
@@ -67,12 +70,20 @@ app.get('/qr', async (req, res) => {
 app.get('/send', async (req, res) => {
     const { number, msg } = req.query;
     if (!isConnected) return res.status(503).send('Error: WhatsApp not connected. Go to /qr');
-    if (!number || !msg) return res.send('Number and Msg required!');
+    if (!number || !msg) return res.status(400).send('Number and Msg required!');
+    
     try {
-        await sock.sendMessage(`88${number}@s.whatsapp.net`, { text: msg });
-        res.send('Success: Message Sent!');
-    } catch (e) { res.send('Failed: ' + e.message); }
+        const jid = `88${number}@s.whatsapp.net`;
+        await sock.sendMessage(jid, { text: msg });
+        res.send('Success: Message Sent!'); // সাকসেস মেসেজ ব্রাউজারে ফেরত যাবে
+    } catch (e) { 
+        res.status(500).send('Failed: ' + e.message); 
+    }
 });
 
 app.get('/', (req, res) => res.send(isConnected ? 'Online' : 'Offline. Go to /qr'));
-app.listen(port, () => { console.log(`Running on ${port}`); connectToWhatsApp(); });
+
+app.listen(port, () => { 
+    console.log(`Running on ${port}`); 
+    connectToWhatsApp(); 
+});
