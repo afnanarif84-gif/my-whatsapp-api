@@ -1,5 +1,5 @@
 {
-  "name": "whatsapp-api-fast",
+  "name": "whatsapp-api-v2",
   "version": "1.0.0",
   "main": "index.js",
   "dependencies": {
@@ -8,7 +8,8 @@
     "qrcode": "^1.5.3",
     "express": "^4.18.2",
     "pino": "^8.16.1",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "fs-extra": "^11.1.1"
   },
   "scripts": {
     "start": "node index.js"
