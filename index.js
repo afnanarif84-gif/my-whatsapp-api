@@ -4,24 +4,20 @@ const express = require('express');
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.get('/', (req, res) => { res.send('Bot is online!'); });
-app.listen(port, () => { console.log(`Server running on port ${port}`); });
+app.get('/', (req, res) => { res.send('WhatsApp Bot is running on Railway!'); });
+app.listen(port, () => { console.log(`Server port: ${port}`); });
 
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
         headless: true,
-        // এখানে ভেরিয়েবল থেকে পাথটি নেওয়া হচ্ছে
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable',
+        // রেলওয়ের জন্য নিচের আর্গুমেন্টগুলো জরুরি
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-setuid-sandbox',
-            '--no-first-run',
             '--no-zygote',
-            '--single-process',
-            '--disable-gpu'
+            '--single-process'
         ],
     }
 });
@@ -39,7 +35,6 @@ app.get('/send', (req, res) => {
     const number = req.query.number;
     const message = req.query.msg;
     if(!number || !message) return res.send('Error: number and msg required');
-
     client.sendMessage(`88${number}@c.us`, message)
         .then(() => res.send('Message Sent!'))
         .catch(err => res.send('Failed: ' + err));
