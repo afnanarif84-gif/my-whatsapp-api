@@ -4,62 +4,45 @@ const express = require('express');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// সার্ভার স্ট্যাটাস চেক করার জন্য
-app.get('/', (req, res) => { res.send('WhatsApp Bot is online and running!'); });
+app.get('/', (req, res) => { res.send('Bot is online!'); });
+app.listen(port, () => { console.log(`Server running on port ${port}`); });
 
-app.listen(port, () => { 
-    console.log(`Server is running on port: ${port}`); 
-});
-
-// হোয়াটসঅ্যাপ ক্লায়েন্ট কনফিগারেশন
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
         headless: true,
-        // রেন্ডার সার্ভারের জন্য প্রয়োজনীয় আর্গুমেন্ট
+        // এখানে ভেরিয়েবল থেকে পাথটি নেওয়া হচ্ছে
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable',
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
+            '--disable-setuid-sandbox',
             '--no-first-run',
             '--no-zygote',
-            '--single-process', 
+            '--single-process',
             '--disable-gpu'
         ],
     }
 });
 
-// কিউআর কোড জেনারেশন
 client.on('qr', (qr) => {
-    console.log('নিচের QR কোডটি আপনার হোয়াটসঅ্যাপ দিয়ে স্ক্যান করুন:');
+    console.log('নিচের QR কোডটি স্ক্যান করুন:');
     qrcode.generate(qr, {small: true});
 });
 
-// সফলভাবে কানেক্ট হলে
 client.on('ready', () => {
-    console.log('WhatsApp Connected Successfully!');
+    console.log('WhatsApp Connected!');
 });
 
-// এসএমএস পাঠানোর এপিআই এন্ডপয়েন্ট
 app.get('/send', (req, res) => {
     const number = req.query.number;
     const message = req.query.msg;
+    if(!number || !message) return res.send('Error: number and msg required');
 
-    if(!number || !message) {
-        return res.send('Error: number and msg required. Example: /send?number=017xx&msg=Hello');
-    }
-
-    // নম্বর ফরম্যাট ঠিক করা (88 যোগ করা)
-    const chatId = `88${number}@c.us`;
-
-    client.sendMessage(chatId, message)
-        .then(() => {
-            res.json({ status: 'success', message: 'Message Sent!' });
-        })
-        .catch(err => {
-            res.json({ status: 'error', message: err.message });
-        });
+    client.sendMessage(`88${number}@c.us`, message)
+        .then(() => res.send('Message Sent!'))
+        .catch(err => res.send('Failed: ' + err));
 });
 
 client.initialize();
