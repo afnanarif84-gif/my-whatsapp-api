@@ -24,7 +24,7 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 // ২. বাংলা ভয়েস জেনারেটর ফাংশন (Microsoft Edge Neural Voice)
 async function generateBengaliAudio(text, filename = "reminder.mp3") {
     const tts = new EdgeTTS({
-        voice: "bn-BD-PradeepNeural", // মেয়ে কণ্ঠে শুনতে চাইলে 'bn-BD-NabanitaNeural' দিতে পারেন
+        voice: "bn-BD-PradeepNeural", // মেয়ে কণ্ঠে শুনতে চাইলে 'bn-BD-NabanitaNeural' দিন
         lang: "bn-BD",
         outputFormat: "audio-24khz-48kbitrate-mono-mp3"
     });
@@ -33,37 +33,55 @@ async function generateBengaliAudio(text, filename = "reminder.mp3") {
     return filePath;
 }
 
-// ৩. Gemini দিয়ে সময় ও কাজের বিবরণ বের করার ফাংশন
+// ৩. Gemini দিয়ে সময় ও কাজের বিবরণ বের করার ফাংশন (Smart Multi-Model Fallback)
 async function parseReminderWithAI(userText) {
-    try {
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-        const now = moment().tz("Asia/Dhaka").format("YYYY-MM-DD HH:mm:ss");
-        
-        const prompt = `
-        Current Time in Bangladesh (Asia/Dhaka): ${now}
-        User Message: "${userText}"
-        
-        You are a smart personal reminder assistant. Extract:
-        1. "isReminder": true if user is asking to be reminded or scheduled for a message/call, otherwise false.
-        2. "time": Target time in ISO format (YYYY-MM-DDTHH:mm:ss+06:00).
-        3. "task": The exact message/task in friendly spoken Bengali to say to the user.
-        4. "reply": A short Bengali confirmation message acknowledging the reminder.
+    const candidateModels = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-8b", "gemini-pro"];
+    const now = moment().tz("Asia/Dhaka").format("YYYY-MM-DD HH:mm:ss");
+    
+    const prompt = `
+    Current Time in Bangladesh (Asia/Dhaka): ${now}
+    User Message: "${userText}"
+    
+    You are a smart personal reminder assistant. Extract:
+    1. "isReminder": true if user is asking to be reminded or scheduled for a message/call, otherwise false.
+    2. "time": Target time in ISO format (YYYY-MM-DDTHH:mm:ss+06:00).
+    3. "task": The exact message/task in friendly spoken Bengali to say to the user.
+    4. "reply": A short Bengali confirmation message acknowledging the reminder.
 
-        Respond ONLY with a valid JSON object without markdown fences, e.g.:
-        {"isReminder": true, "time": "2026-09-22T12:00:00+06:00", "task": "আপনার দুপুর ১২টার মিটিং শুরু করার কথা ছিল।", "reply": "ঠিক আছে! আমি কাল দুপুর ১২:০০ টায় আপনাকে মনে করিয়ে দেব।"}
-        `;
+    Respond ONLY with a valid JSON object without markdown fences, e.g.:
+    {"isReminder": true, "time": "2026-09-22T12:00:00+06:00", "task": "আপনার দুপুর ১২টার মিটিং শুরু করার কথা ছিল।", "reply": "ঠিক আছে! আমি কাল দুপুর ১২:০০ টায় আপনাকে মনে করিয়ে দেব।"}
+    `;
 
-        const result = await model.generateContent(prompt);
-        let responseText = result.response.text().trim();
-        responseText = responseText.replace(/```json|```/g, '').trim();
-        return JSON.parse(responseText);
-    } catch (e) {
-        console.error("AI Error:", e);
-        return null;
+    for (const modelName of candidateModels) {
+        try {
+            const model = genAI.getGenerativeModel({ model: modelName });
+            const result = await model.generateContent(prompt);
+            let responseText = result.response.text().trim();
+            responseText = responseText.replace(/```json|```/g, '').trim();
+            const data = JSON.parse(responseText);
+            if (data && data.isReminder) return data;
+        } catch (e) {
+            console.warn(`Model ${modelName} failed, trying next...`);
+        }
     }
+
+    // ব্যাকআপ শিডিউলার (যদি API সাময়িক অফলাইন থাকে)
+    const minMatch = userText.match(/(\d+)\s*(মিনিট|min|minute)/i);
+    if (minMatch) {
+        const mins = parseInt(minMatch[1], 10);
+        const targetTime = moment().tz("Asia/Dhaka").add(mins, 'minutes').format();
+        return {
+            isReminder: true,
+            time: targetTime,
+            task: userText.replace(/মনে করিয়ে দিও|মনে করিয়ে দাও|কল দিও/gi, '').trim(),
+            reply: `ঠিক আছে! আমি ${mins} মিনিট পর আপনাকে ভয়েস নোট পাঠিয়ে মনে করিয়ে দেব।`
+        };
+    }
+
+    return null;
 }
 
-// ৪. WhatsApp কানেকশন ফাংশন
+// ৪. WhatsApp কানেকশন
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('session_auth');
 
@@ -98,7 +116,7 @@ async function connectToWhatsApp() {
             if (textContent) {
                 console.log(`Received message: ${textContent}`);
                 
-                // AI দিয়ে মেসেজ বিশ্লেষণ
+                // AI বিশ্লেষণ
                 const aiData = await parseReminderWithAI(textContent);
 
                 if (aiData && aiData.isReminder && aiData.time) {
@@ -108,26 +126,25 @@ async function connectToWhatsApp() {
                     const targetDate = new Date(aiData.time);
                     console.log(`Reminder scheduled for: ${targetDate}`);
 
-                    // নির্দিষ্ট সময়ে রিমাইন্ডার শিডিউল
+                    // নির্ধারিত সময়ে রিমাইন্ডার চালানো
                     schedule.scheduleJob(targetDate, async () => {
                         let audioFile = null;
                         try {
-                            // সুন্দর বাংলা ভয়েস তৈরি
+                            // ভয়েস নোট তৈরি
                             audioFile = await generateBengaliAudio(aiData.task, `remind_${Date.now()}.mp3`);
                             
-                            // WhatsApp Voice Note (PTT) হিসেবে সরাসরি পাঠানো
+                            // WhatsApp Voice Note (PTT) পাঠানো
                             await sock.sendMessage(senderJid, {
                                 audio: fs.readFileSync(audioFile),
                                 mimetype: 'audio/mp4',
                                 ptt: true
                             });
 
-                            // সাথে লিখিত টেক্সট মেসেজ পাঠানো
+                            // সাথে টেক্সট পাঠানো
                             await sock.sendMessage(senderJid, { text: `🔔 রিমাইন্ডার:\n${aiData.task}` });
                         } catch (err) {
                             console.error("Failed to send scheduled reminder:", err);
                         } finally {
-                            // কাজ শেষে অস্থায়ী অডিও ফাইল মুছে ফেলা
                             if (audioFile && fs.existsSync(audioFile)) {
                                 fs.unlinkSync(audioFile);
                             }
