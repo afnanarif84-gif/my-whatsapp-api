@@ -28,7 +28,7 @@ function toEnglishDigits(str) {
 // বাংলা ভয়েস অডিও তৈরি ফাংশন
 async function generateBengaliAudio(text, filename = "reminder.mp3") {
     const tts = new EdgeTTS({
-        voice: "bn-BD-PradeepNeural",
+        voice: "bn-BD-PradeepNeural", // মেয়ে কণ্ঠে শুনতে চাইলে 'bn-BD-NabanitaNeural' দিন
         lang: "bn-BD",
         outputFormat: "audio-24khz-48kbitrate-mono-mp3"
     });
@@ -37,12 +37,12 @@ async function generateBengaliAudio(text, filename = "reminder.mp3") {
     return filePath;
 }
 
-// রিমাইন্ডার প্রসেসিং (Gemini REST + Smart Fallback)
+// রিমাইন্ডার প্রসেসিং
 async function parseReminder(rawText) {
     const userText = toEnglishDigits(rawText);
     const now = moment().tz("Asia/Dhaka").format("YYYY-MM-DD HH:mm:ss");
 
-    // ১. চেষ্টা করা হবে Gemini API দিয়ে বোঝার
+    // ১. Gemini API চেষ্টা
     if (GEMINI_KEY) {
         try {
             const prompt = `Current Time in Bangladesh: ${now}\nUser Message: "${userText}"\nExtract reminder details. Reply ONLY with JSON:\n{"isReminder": true, "time": "YYYY-MM-DDTHH:mm:ss+06:00", "task": "কাজের বিবরণ বাংলায়", "reply": "কনফার্মেশন মেসেজ বাংলায়"}`;
@@ -65,7 +65,7 @@ async function parseReminder(rawText) {
         }
     }
 
-    // ২. স্মার্ট অফলাইন শিডিউলার (যদি API মিস করে তাও ১০০% কাজ করবে)
+    // ২. স্মার্ট অফলাইন শিডিউলার
     const minMatch = userText.match(/(\d+)\s*(মিনিট|min|minute|মিনিটের)/i);
     const hourMatch = userText.match(/(\d+)\s*(ঘণ্টা|ঘন্টা|hour)/i);
 
@@ -85,7 +85,7 @@ async function parseReminder(rawText) {
         return {
             isReminder: true,
             time: targetTime,
-            task: cleanTask.length > 2 ? `আপনার কাজ: ${cleanTask}` : rawText,
+            task: cleanTask.length > 2 ? cleanTask : rawText,
             reply: `ঠিক আছে! আমি ঠিক ${minMatch ? minMatch[1] : (hourMatch ? hourMatch[1] : '')} ${minMatch ? 'মিনিট' : 'ঘণ্টা'} পর আপনাকে ভয়েস মেসেজ পাঠিয়ে মনে করিয়ে দেব।`
         };
     }
@@ -117,7 +117,7 @@ async function connectToWhatsApp() {
         }
     });
 
-    // মেসেজ রিসিভ ও হ্যান্ডলিং
+    // মেসেজ হ্যান্ডলিং
     sock.ev.on('messages.upsert', async m => {
         const msg = m.messages[0];
         if (!msg.key.fromMe && m.type === 'notify') {
@@ -130,29 +130,30 @@ async function connectToWhatsApp() {
                 const reminderData = await parseReminder(textContent);
 
                 if (reminderData && reminderData.isReminder && reminderData.time) {
-                    // সাথে সাথে কনফার্মেশন রিপ্লাই পাঠানো
+                    // কনফার্মেশন রিপ্লাই
                     await sock.sendMessage(senderJid, { text: reminderData.reply });
-                    console.log(`✅ Confirmation sent! Scheduled for: ${reminderData.time}`);
+                    console.log(`✅ Scheduled for: ${reminderData.time}`);
 
                     const targetDate = new Date(reminderData.time);
 
-                    // নির্দিষ্ট সময়ে ভয়েস রিমাইন্ডার ট্রিগার
+                    // নির্দিষ্ট সময়ে অডিও ও টেক্সট পাঠানো
                     schedule.scheduleJob(targetDate, async () => {
                         let audioFile = null;
                         try {
-                            console.log(`⏰ Triggering voice reminder...`);
-                            audioFile = await generateBengaliAudio(reminderData.task, `remind_${Date.now()}.mp3`);
+                            console.log(`⏰ Sending voice reminder...`);
+                            const speechText = `আপনার কাজের সময় হয়েছে। ${reminderData.task}`;
+                            audioFile = await generateBengaliAudio(speechText, `remind_${Date.now()}.mp3`);
 
-                            // ভয়েস নোট পাঠানো
+                            // অডিও ফাইল পাঠানো (playable format)
                             await sock.sendMessage(senderJid, {
                                 audio: fs.readFileSync(audioFile),
                                 mimetype: 'audio/mp4',
-                                ptt: true
+                                ptt: false // ptt: false দিলে এটি সরাসরি প্লে হবে
                             });
 
-                            // টেক্সট পাঠানো
+                            // সাথে টেক্সট মেসেজ
                             await sock.sendMessage(senderJid, { text: `🔔 রিমাইন্ডার:\n${reminderData.task}` });
-                            console.log(`🎉 Reminder delivered successfully!`);
+                            console.log(`🎉 Reminder delivered!`);
                         } catch (err) {
                             console.error("Failed to send reminder:", err);
                         } finally {
@@ -182,7 +183,6 @@ app.get('/qr', async (req, res) => {
     }
 });
 
-// লগআউট
 app.get('/logout', (req, res) => {
     if (fs.existsSync('session_auth')) {
         fs.rmSync('session_auth', { recursive: true, force: true });
