@@ -1,5 +1,4 @@
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { EdgeTTS } = require("node-edge-tts");
 const schedule = require("node-schedule");
 const moment = require("moment-timezone");
@@ -18,13 +17,18 @@ let sock;
 let isConnected = false;
 let lastQR = null;
 
-// ১. Gemini AI কনফিগারেশন
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+const GEMINI_KEY = process.env.GEMINI_API_KEY || "";
 
-// ২. বাংলা ভয়েস জেনারেটর ফাংশন (Microsoft Edge Neural Voice)
+// বাংলা সংখ্যাকে ইংরেজি সংখ্যায় রূপান্তর
+function toEnglishDigits(str) {
+    const bnDigits = { '০': '0', '১': '1', '২': '2', '৩': '3', '৪': '4', '৫': '5', '৬': '6', '৭': '7', '৮': '8', '৯': '9' };
+    return str.replace(/[০-৯]/g, char => bnDigits[char]);
+}
+
+// বাংলা ভয়েস অডিও তৈরি ফাংশন
 async function generateBengaliAudio(text, filename = "reminder.mp3") {
     const tts = new EdgeTTS({
-        voice: "bn-BD-PradeepNeural", // মেয়ে কণ্ঠে শুনতে চাইলে 'bn-BD-NabanitaNeural' দিন
+        voice: "bn-BD-PradeepNeural",
         lang: "bn-BD",
         outputFormat: "audio-24khz-48kbitrate-mono-mp3"
     });
@@ -33,61 +37,68 @@ async function generateBengaliAudio(text, filename = "reminder.mp3") {
     return filePath;
 }
 
-// ৩. Gemini দিয়ে সময় ও কাজের বিবরণ বের করার ফাংশন (Smart Multi-Model Fallback)
-async function parseReminderWithAI(userText) {
-    const candidateModels = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-8b", "gemini-pro"];
+// রিমাইন্ডার প্রসেসিং (Gemini REST + Smart Fallback)
+async function parseReminder(rawText) {
+    const userText = toEnglishDigits(rawText);
     const now = moment().tz("Asia/Dhaka").format("YYYY-MM-DD HH:mm:ss");
-    
-    const prompt = `
-    Current Time in Bangladesh (Asia/Dhaka): ${now}
-    User Message: "${userText}"
-    
-    You are a smart personal reminder assistant. Extract:
-    1. "isReminder": true if user is asking to be reminded or scheduled for a message/call, otherwise false.
-    2. "time": Target time in ISO format (YYYY-MM-DDTHH:mm:ss+06:00).
-    3. "task": The exact message/task in friendly spoken Bengali to say to the user.
-    4. "reply": A short Bengali confirmation message acknowledging the reminder.
 
-    Respond ONLY with a valid JSON object without markdown fences, e.g.:
-    {"isReminder": true, "time": "2026-09-22T12:00:00+06:00", "task": "আপনার দুপুর ১২টার মিটিং শুরু করার কথা ছিল।", "reply": "ঠিক আছে! আমি কাল দুপুর ১২:০০ টায় আপনাকে মনে করিয়ে দেব।"}
-    `;
-
-    for (const modelName of candidateModels) {
+    // ১. চেষ্টা করা হবে Gemini API দিয়ে বোঝার
+    if (GEMINI_KEY) {
         try {
-            const model = genAI.getGenerativeModel({ model: modelName });
-            const result = await model.generateContent(prompt);
-            let responseText = result.response.text().trim();
-            responseText = responseText.replace(/```json|```/g, '').trim();
-            const data = JSON.parse(responseText);
-            if (data && data.isReminder) return data;
-        } catch (e) {
-            console.warn(`Model ${modelName} failed, trying next...`);
+            const prompt = `Current Time in Bangladesh: ${now}\nUser Message: "${userText}"\nExtract reminder details. Reply ONLY with JSON:\n{"isReminder": true, "time": "YYYY-MM-DDTHH:mm:ss+06:00", "task": "কাজের বিবরণ বাংলায়", "reply": "কনফার্মেশন মেসেজ বাংলায়"}`;
+            
+            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+            });
+
+            const json = await res.json();
+            const textResponse = json?.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (textResponse) {
+                const cleanJson = textResponse.replace(/```json|```/g, '').trim();
+                const parsed = JSON.parse(cleanJson);
+                if (parsed && parsed.isReminder) return parsed;
+            }
+        } catch (err) {
+            console.log("AI API fallback active:", err.message);
         }
     }
 
-    // ব্যাকআপ শিডিউলার (যদি API সাময়িক অফলাইন থাকে)
-    const minMatch = userText.match(/(\d+)\s*(মিনিট|min|minute)/i);
-    if (minMatch) {
-        const mins = parseInt(minMatch[1], 10);
-        const targetTime = moment().tz("Asia/Dhaka").add(mins, 'minutes').format();
+    // ২. স্মার্ট অফলাইন শিডিউলার (যদি API মিস করে তাও ১০০% কাজ করবে)
+    const minMatch = userText.match(/(\d+)\s*(মিনিট|min|minute|মিনিটের)/i);
+    const hourMatch = userText.match(/(\d+)\s*(ঘণ্টা|ঘন্টা|hour)/i);
+
+    if (minMatch || hourMatch) {
+        let addMins = 0;
+        if (minMatch) addMins += parseInt(minMatch[1], 10);
+        if (hourMatch) addMins += parseInt(hourMatch[1], 10) * 60;
+
+        const targetTime = moment().tz("Asia/Dhaka").add(addMins, 'minutes').format();
+        const cleanTask = rawText
+            .replace(/আমাকে/g, '')
+            .replace(/এখন থেকে/g, '')
+            .replace(/মনে করিয়ে দাও|মনে করিয়ে দিও|কল দিয়ে বলো|বলবা/gi, '')
+            .replace(/[০-৯\d]+\s*(মিনিট|মিনিটের|ঘণ্টা|ঘন্টা|পরে|পর)/gi, '')
+            .trim();
+
         return {
             isReminder: true,
             time: targetTime,
-            task: userText.replace(/মনে করিয়ে দিও|মনে করিয়ে দাও|কল দিও/gi, '').trim(),
-            reply: `ঠিক আছে! আমি ${mins} মিনিট পর আপনাকে ভয়েস নোট পাঠিয়ে মনে করিয়ে দেব।`
+            task: cleanTask.length > 2 ? `আপনার কাজ: ${cleanTask}` : rawText,
+            reply: `ঠিক আছে! আমি ঠিক ${minMatch ? minMatch[1] : (hourMatch ? hourMatch[1] : '')} ${minMatch ? 'মিনিট' : 'ঘণ্টা'} পর আপনাকে ভয়েস মেসেজ পাঠিয়ে মনে করিয়ে দেব।`
         };
     }
 
     return null;
 }
 
-// ৪. WhatsApp কানেকশন
+// WhatsApp কানেকশন
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('session_auth');
 
     sock = makeWASocket({
         auth: state,
-        printQRInTerminal: true,
         logger: pino({ level: 'silent' })
     });
 
@@ -106,7 +117,7 @@ async function connectToWhatsApp() {
         }
     });
 
-    // 📩 ইনকামিং মেসেজ প্রসেসিং
+    // মেসেজ রিসিভ ও হ্যান্ডলিং
     sock.ev.on('messages.upsert', async m => {
         const msg = m.messages[0];
         if (!msg.key.fromMe && m.type === 'notify') {
@@ -114,36 +125,36 @@ async function connectToWhatsApp() {
             const textContent = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
 
             if (textContent) {
-                console.log(`Received message: ${textContent}`);
-                
-                // AI বিশ্লেষণ
-                const aiData = await parseReminderWithAI(textContent);
+                console.log(`📩 New message: ${textContent}`);
 
-                if (aiData && aiData.isReminder && aiData.time) {
-                    // সাথে সাথে কনফার্মেশন রিপ্লাই
-                    await sock.sendMessage(senderJid, { text: aiData.reply });
+                const reminderData = await parseReminder(textContent);
 
-                    const targetDate = new Date(aiData.time);
-                    console.log(`Reminder scheduled for: ${targetDate}`);
+                if (reminderData && reminderData.isReminder && reminderData.time) {
+                    // সাথে সাথে কনফার্মেশন রিপ্লাই পাঠানো
+                    await sock.sendMessage(senderJid, { text: reminderData.reply });
+                    console.log(`✅ Confirmation sent! Scheduled for: ${reminderData.time}`);
 
-                    // নির্ধারিত সময়ে রিমাইন্ডার চালানো
+                    const targetDate = new Date(reminderData.time);
+
+                    // নির্দিষ্ট সময়ে ভয়েস রিমাইন্ডার ট্রিগার
                     schedule.scheduleJob(targetDate, async () => {
                         let audioFile = null;
                         try {
-                            // ভয়েস নোট তৈরি
-                            audioFile = await generateBengaliAudio(aiData.task, `remind_${Date.now()}.mp3`);
-                            
-                            // WhatsApp Voice Note (PTT) পাঠানো
+                            console.log(`⏰ Triggering voice reminder...`);
+                            audioFile = await generateBengaliAudio(reminderData.task, `remind_${Date.now()}.mp3`);
+
+                            // ভয়েস নোট পাঠানো
                             await sock.sendMessage(senderJid, {
                                 audio: fs.readFileSync(audioFile),
                                 mimetype: 'audio/mp4',
                                 ptt: true
                             });
 
-                            // সাথে টেক্সট পাঠানো
-                            await sock.sendMessage(senderJid, { text: `🔔 রিমাইন্ডার:\n${aiData.task}` });
+                            // টেক্সট পাঠানো
+                            await sock.sendMessage(senderJid, { text: `🔔 রিমাইন্ডার:\n${reminderData.task}` });
+                            console.log(`🎉 Reminder delivered successfully!`);
                         } catch (err) {
-                            console.error("Failed to send scheduled reminder:", err);
+                            console.error("Failed to send reminder:", err);
                         } finally {
                             if (audioFile && fs.existsSync(audioFile)) {
                                 fs.unlinkSync(audioFile);
@@ -158,44 +169,33 @@ async function connectToWhatsApp() {
     sock.ev.on('creds.update', saveCreds);
 }
 
-// কিউআর কোড পেজ
+// কিউআর কোড রুট
 app.get('/qr', async (req, res) => {
     if (isConnected) return res.send('<h1>আপনার হোয়াটসঅ্যাপ কানেক্টেড আছে!</h1>');
-    if (!lastQR) return res.send('<h1>কিউআর কোড লোড হচ্ছে, ৫ সেকেন্ড পর পেজটি রিফ্রেশ দিন...</h1>');
+    if (!lastQR) return res.send('<h1>কিউআর কোড আসছে, রিফ্রেশ দিন...</h1>');
 
     try {
         const qrImage = await QRCode.toDataURL(lastQR);
-        res.send(`
-            <html>
-                <head><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
-                <body style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; background:#f0f2f5; font-family:sans-serif;">
-                    <div style="background:white; padding:30px; border-radius:15px; box-shadow:0 10px 25px rgba(0,0,0,0.1); text-align:center;">
-                        <h2 style="color:#075e54;">AI WhatsApp Assistant</h2>
-                        <img src="${qrImage}" style="width:260px; height:260px; border:4px solid #25d366; border-radius:10px;" />
-                        <p style="margin-top:15px; color:#555;">আপনার হোয়াটসঅ্যাপের <b>Linked Devices</b> দিয়ে স্ক্যান করুন।</p>
-                    </div>
-                </body>
-            </html>
-        `);
+        res.send(`<html><body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#f0f2f5;font-family:sans-serif;"><div style="background:white;padding:30px;border-radius:15px;text-align:center;"><h2>AI WhatsApp Assistant</h2><img src="${qrImage}" style="width:260px;height:260px;"/><p>Linked Devices দিয়ে স্ক্যান করুন</p></div></body></html>`);
     } catch (err) {
-        res.status(500).send('QR Code error.');
+        res.status(500).send('QR Error');
     }
 });
 
-// লগআউট রুট
+// লগআউট
 app.get('/logout', (req, res) => {
     if (fs.existsSync('session_auth')) {
         fs.rmSync('session_auth', { recursive: true, force: true });
-        res.send('Logged Out. Restarting server...');
+        res.send('Logged Out. Server restarting...');
         process.exit(0);
     } else {
         res.send('No active session.');
     }
 });
 
-app.get('/', (req, res) => res.send(isConnected ? 'AI Bot is Online 🚀' : 'Offline. Scan /qr'));
+app.get('/', (req, res) => res.send(isConnected ? 'AI Bot Online 🚀' : 'Offline. Scan /qr'));
 
 app.listen(port, () => {
-    console.log(`Server listening on ${port}`);
+    console.log(`Server running on port ${port}`);
     connectToWhatsApp();
 });
